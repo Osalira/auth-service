@@ -6,7 +6,7 @@ load_dotenv()
 
 class Config:
     # Database Configuration
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'postgresql://postgres:osalocal_database@localhost:5432/db_daytrading_auth')
+    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'postgresql://postgres:osalocal_database@db:5432/auth_db')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
     # JWT Configuration
