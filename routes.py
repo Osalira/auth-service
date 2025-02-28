@@ -176,8 +176,8 @@ def login():
         response_data = {
             "success": True,
             "data": {
-                "message": "Login successful",
                 "token": access_token,
+                "message": "Login successful",
                 "account": {
                     "id": account.id,
                     "username": account.username,
