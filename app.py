@@ -6,6 +6,7 @@ import os
 import logging
 import jwt as pyjwt
 from datetime import datetime, timezone
+from sqlalchemy import inspect
 
 # Load environment variables
 load_dotenv()
@@ -40,8 +41,13 @@ CORS(app)
 from database import engine, Base
 import models  # Import models to register them with Base
 
-# Create database tables
-Base.metadata.create_all(bind=engine)
+# Create database tables only if they don't exist
+inspector = inspect(engine)
+if not inspector.has_table("accounts"):
+    logger.info("Creating database tables as they don't exist")
+    Base.metadata.create_all(bind=engine)
+else:
+    logger.info("Database tables already exist, skipping creation")
 
 # Import routes
 from routes import auth_bp
