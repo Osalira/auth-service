@@ -63,8 +63,8 @@ class Company(Base):
     
     id = Column(Integer, ForeignKey("accounts.id"), primary_key=True)
     company_name = Column(String(120), nullable=False)
-    business_registration = Column(String(50), unique=True)
-    company_email = Column(String(120), unique=True)
+    business_registration = Column(String(50), unique=True, nullable=True)
+    company_email = Column(String(120), unique=True, nullable=True)
     contact_phone = Column(String(20))
     address = Column(String(255))
     industry = Column(String(50))

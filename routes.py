@@ -3,6 +3,7 @@ from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identi
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import logging
+import uuid
 
 from database import get_db
 from models import Account, User, Company
@@ -44,8 +45,22 @@ def register():
             # Generate a default email if not provided
             data['email'] = f"{data['username']}@example.com"
     elif data['account_type'] == 'company':
-        if 'company_name' not in data or 'business_registration' not in data or 'company_email' not in data:
-            return jsonify({"success": False, "data": {"error": "Company accounts require company_name, business_registration, and company_email"}}), 400
+        # For company accounts, only company_name is required, which can come from 'name' field
+        if 'name' not in data and 'company_name' not in data:
+            return jsonify({"success": False, "data": {"error": "Company accounts require a name"}}), 400
+        
+        # Use 'name' as 'company_name' if not provided
+        if 'company_name' not in data:
+            data['company_name'] = data['name']
+        
+        # Generate default values for required company fields
+        if 'business_registration' not in data:
+            # Generate a unique business registration
+            data['business_registration'] = f"BR-{uuid.uuid4().hex[:8].upper()}"
+        
+        if 'company_email' not in data:
+            # Generate a default company email
+            data['company_email'] = f"{data['username']}-company@example.com"
     else:
         return jsonify({"success": False, "data": {"error": "Invalid account_type. Must be 'user' or 'company'"}}), 400
     
@@ -101,16 +116,24 @@ def register():
                 "account": account_data
             }
         }
-        
         return jsonify(response_data), 201
         
-    except IntegrityError:
+    except IntegrityError as e:
         db.rollback()
-        return jsonify({"success": False, "data": {"error": "Username already exists"}}), 400
+        error_message = str(e)
+        if "accounts.username" in error_message:
+            return jsonify({"success": False, "data": {"error": "Username already exists"}}), 400
+        elif "companies.business_registration" in error_message:
+            return jsonify({"success": False, "data": {"error": "Business registration already exists"}}), 400
+        elif "companies.company_email" in error_message:
+            return jsonify({"success": False, "data": {"error": "Company email already exists"}}), 400
+        else:
+            logger.error(f"Registration error: {e}")
+            return jsonify({"success": False, "data": {"error": "An error occurred during registration"}}), 500
     except Exception as e:
         db.rollback()
-        logger.error(f"Error creating account: {str(e)}")
-        return jsonify({"success": False, "data": {"error": f"Error creating account: {str(e)}"}}), 500
+        logger.error(f"Registration error: {e}")
+        return jsonify({"success": False, "data": {"error": "An error occurred during registration"}}), 500
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
