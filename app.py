@@ -7,6 +7,9 @@ import logging
 import jwt as pyjwt
 from datetime import datetime, timezone
 from sqlalchemy import inspect
+import time
+import tempfile
+import fcntl
 
 # Load environment variables
 load_dotenv()
@@ -41,13 +44,40 @@ CORS(app)
 from database import engine, Base
 import models  # Import models to register them with Base
 
-# Create database tables only if they don't exist
-inspector = inspect(engine)
-if not inspector.has_table("accounts"):
-    logger.info("Creating database tables as they don't exist")
-    Base.metadata.create_all(bind=engine)
-else:
-    logger.info("Database tables already exist, skipping creation")
+# Use a lock file to prevent concurrent schema creation
+def initialize_database():
+    lock_file = os.path.join(tempfile.gettempdir(), 'auth_service_db_init.lock')
+    try:
+        with open(lock_file, 'w') as f:
+            # Try to acquire an exclusive lock
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                logger.info("Acquired lock for database initialization")
+                
+                # Now check if tables exist
+                inspector = inspect(engine)
+                if not inspector.has_table("accounts"):
+                    logger.info("Creating database tables as they don't exist")
+                    Base.metadata.create_all(bind=engine)
+                else:
+                    logger.info("Database tables already exist, skipping creation")
+                    
+                # Release the lock
+                fcntl.flock(f, fcntl.LOCK_UN)
+                logger.info("Released lock for database initialization")
+                
+            except IOError:
+                logger.info("Another process is initializing the database, waiting...")
+                # Wait for the other process to finish initialization
+                time.sleep(2)
+                logger.info("Continuing after waiting for database initialization")
+                
+    except Exception as e:
+        logger.error(f"Error during database initialization: {str(e)}")
+        # Continue execution even if there's an error with the lock mechanism
+
+# Initialize the database with a lock to prevent race conditions
+initialize_database()
 
 # Import routes
 from routes import auth_bp
