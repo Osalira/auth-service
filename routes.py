@@ -251,7 +251,7 @@ def login():
         
         # Check if account exists and password is correct
         if not account or not account.check_password(data['password']):
-            return jsonify({"success": False, "data": {"error": "Invalid username or password"}}), 401
+            return jsonify({"success": False, "data": {"error": "Invalid username or password"}}), 400
         
         # Check if account is active
         if not account.is_active:
