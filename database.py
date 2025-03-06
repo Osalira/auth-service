@@ -24,7 +24,16 @@ def get_engine_with_retry(url, max_retries=5, retry_interval=2):
     while retries < max_retries:
         try:
             logger.info(f"Attempting to connect to database (attempt {retries + 1}/{max_retries})...")
-            engine = create_engine(url)
+            # Increase connection pool size for high concurrency
+            engine = create_engine(
+                url,
+                pool_size=100,               # Increase from default 5
+                max_overflow=200,            # Increase from default 10
+                pool_timeout=60,             # Increase timeout from default 30
+                pool_recycle=1800,           # Recycle connections after 30 minutes
+                pool_pre_ping=True,          # Check connection validity before using
+                echo_pool=True               # Log pool events for debugging
+            )
             # Test the connection
             connection = engine.connect()
             connection.close()
