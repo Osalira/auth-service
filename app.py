@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, get_jwt
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -10,6 +10,8 @@ from sqlalchemy import inspect
 import time
 import tempfile
 import fcntl
+import threading
+from rabbitmq import start_consumer, publish_event
 
 # Load environment variables
 load_dotenv()
@@ -41,7 +43,7 @@ jwt = JWTManager(app)
 CORS(app)
 
 # Import database and models
-from database import engine, Base
+from database import engine, Base, get_db
 import models  # Import models to register them with Base
 
 # Use a lock file to prevent concurrent schema creation
@@ -83,7 +85,93 @@ initialize_database()
 from routes import auth_bp
 
 # Register blueprints
-app.register_blueprint(auth_bp, url_prefix='/authentication')
+app.register_blueprint(auth_bp)
+
+# Event handlers for RabbitMQ consumers
+def handle_user_events(event):
+    """Handle user-related events"""
+    logger.info(f"Received user event: {event.get('event_type')}")
+    
+    event_type = event.get('event_type')
+    try:
+        if event_type == 'user.login':
+            # Log the login event
+            user_id = event.get('user_id')
+            username = event.get('username')
+            logger.info(f"User login: {username} (ID: {user_id})")
+            
+            # Update last_login in database if needed
+            db = get_db()
+            user = db.query(models.Account).filter_by(id=user_id).first()
+            if user:
+                user.last_login = datetime.utcnow()
+                db.commit()
+                logger.info(f"Updated last_login for user {username}")
+            db.close()
+        
+        elif event_type == 'user.password_reset_requested':
+            # Process password reset request
+            username = event.get('username')
+            logger.info(f"Password reset requested for user: {username}")
+            
+            # You would implement password reset logic here
+            # For example, generate a token and send an email
+
+        elif event_type == 'system.error':
+            # Log system errors
+            service = event.get('service')
+            error = event.get('error')
+            logger.error(f"System error in {service}: {error}")
+    
+    except Exception as e:
+        logger.error(f"Error processing user event: {str(e)}")
+        # Publish error event
+        error_event = {
+            'event_type': 'system.error',
+            'service': 'auth-service',
+            'operation': 'event_processing',
+            'error': str(e),
+            'original_event': event
+        }
+        publish_event('system_events', 'system.error', error_event)
+
+def start_event_consumers():
+    """Start RabbitMQ event consumers"""
+    try:
+        # Start consumer for user events
+        logger.info("Starting user events consumer")
+        start_consumer(
+            queue_name='auth_service_user_events',
+            routing_keys=['user.login', 'user.logout', 'user.password_reset_requested'],
+            exchange='user_events',
+            callback=handle_user_events
+        )
+        
+        # Start consumer for system events
+        logger.info("Starting system events consumer")
+        start_consumer(
+            queue_name='auth_service_system_events',
+            routing_keys=['system.error', 'system.notification'],
+            exchange='system_events',
+            callback=handle_user_events
+        )
+        
+        logger.info("Event consumers started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start event consumers: {str(e)}")
+
+# Start event consumers in a separate thread after a short delay
+def delayed_start_event_consumers():
+    """Start event consumers after a short delay to ensure app is fully initialized"""
+    def start_consumers_thread():
+        # Wait a few seconds for the app to fully initialize
+        time.sleep(5)
+        start_event_consumers()
+    
+    # Start the delayed consumer thread
+    consumer_thread = threading.Thread(target=start_consumers_thread)
+    consumer_thread.daemon = True
+    consumer_thread.start()
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
@@ -158,6 +246,9 @@ def validate_token():
 if __name__ == '__main__':
     # Create logs directory if it doesn't exist
     os.makedirs('logs', exist_ok=True)
+    
+    # Start event consumers after a short delay
+    delayed_start_event_consumers()
     
     # Run the app
     app.run(host='0.0.0.0', port=5000, debug=os.getenv('FLASK_DEBUG', 'False').lower() == 'true') 

@@ -7,6 +7,7 @@ import uuid
 
 from database import get_db
 from models import Account, User, Company
+from rabbitmq import publish_event
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ auth_bp = Blueprint('auth', __name__)
 @auth_bp.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
+    trace_id = uuid.uuid4().hex[:8]
     
     # Handle JMeter test format (user_name instead of username)
     if 'user_name' in data and 'username' not in data:
@@ -69,7 +71,6 @@ def register():
         # First check if username already exists BEFORE attempting creation
         existing_account = db.query(Account).filter_by(username=data['username']).first()
         if existing_account:
-            trace_id = uuid.uuid4().hex[:8]
             logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing username: {data['username']}")
             return jsonify({"success": False, "data": {"error": "Username already exists", "trace_id": trace_id}}), 400
             
@@ -77,7 +78,6 @@ def register():
         if data['account_type'] == 'user' and 'email' in data:
             existing_email = db.query(User).filter_by(email=data['email']).first()
             if existing_email:
-                trace_id = uuid.uuid4().hex[:8]
                 logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing email: {data['email']}")
                 return jsonify({"success": False, "data": {"error": "Email already exists", "trace_id": trace_id}}), 400
                 
@@ -85,7 +85,6 @@ def register():
         if data['account_type'] == 'company' and 'company_email' in data:
             existing_company_email = db.query(Company).filter_by(company_email=data['company_email']).first()
             if existing_company_email:
-                trace_id = uuid.uuid4().hex[:8]
                 logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing company email: {data['company_email']}")
                 return jsonify({"success": False, "data": {"error": "Company email already exists", "trace_id": trace_id}}), 400
                 
@@ -93,9 +92,19 @@ def register():
         if data['account_type'] == 'company' and 'business_registration' in data:
             existing_registration = db.query(Company).filter_by(business_registration=data['business_registration']).first()
             if existing_registration:
-                trace_id = uuid.uuid4().hex[:8]
                 logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing business registration: {data['business_registration']}")
                 return jsonify({"success": False, "data": {"error": "Business registration already exists", "trace_id": trace_id}}), 400
+            
+        # Publish user registration attempt event (before actual creation)
+        # This can be consumed by monitoring/fraud detection systems
+        registration_started_event = {
+            'event_type': 'user.registration_started',
+            'username': data['username'],
+            'account_type': data['account_type'],
+            'timestamp': datetime.utcnow().isoformat(),
+            'trace_id': trace_id
+        }
+        publish_event('user_events', 'user.registration_started', registration_started_event)
             
         # Create account
         account = Account(
@@ -182,13 +191,49 @@ def register():
                 "account": account_data
             }
         }
+        
+        # Publish user.registered event
+        user_registered_event = {
+            'event_type': 'user.registered',
+            'user_id': account.id, 
+            'username': account.username,
+            'account_type': account.account_type,
+            'created_at': datetime.utcnow().isoformat(),
+            'trace_id': trace_id
+        }
+        
+        # Add account-specific data to the event
+        if data['account_type'] == 'user':
+            user_registered_event.update({
+                'name': user.name,
+                'email': user.email
+            })
+        else:  # company
+            user_registered_event.update({
+                'company_name': company.company_name,
+                'business_registration': company.business_registration,
+                'company_email': company.company_email
+            })
+            
+        # Publish the event asynchronously
+        publish_event('user_events', 'user.registered', user_registered_event)
+        logger.info(f"[TraceID: {trace_id}] Published user.registered event for user {account.username} (ID: {account.id})")
+        
         return jsonify(response_data), 201
         
     except IntegrityError as e:
         db.rollback()
         error_message = str(e)
-        trace_id = uuid.uuid4().hex[:8]
         logger.error(f"[TraceID: {trace_id}] IntegrityError during registration: {error_message}")
+        
+        # Publish registration error event
+        error_event = {
+            'event_type': 'user.registration_failed',
+            'username': data['username'],
+            'error': str(e),
+            'trace_id': trace_id
+        }
+        publish_event('system_events', 'user.registration_failed', error_event)
         
         # More robust checks for username constraint violations
         if "accounts.username" in error_message or "accounts_username_key" in error_message or "username" in error_message:
@@ -198,39 +243,32 @@ def register():
         elif "companies.business_registration" in error_message or "business_registration_key" in error_message:
             return jsonify({"success": False, "data": {"error": "Business registration already exists", "trace_id": trace_id}}), 400
         
-        # More robust checks for company email constraint violations
-        elif "companies.company_email" in error_message or "company_email_key" in error_message:
-            return jsonify({"success": False, "data": {"error": "Company email already exists", "trace_id": trace_id}}), 400
-        
-        # More robust checks for user email constraint violations
-        elif "users.email" in error_message or "users_email_key" in error_message:
-            return jsonify({"success": False, "data": {"error": "Email address already exists", "trace_id": trace_id}}), 400
-        
-        # If it's another unique constraint violation that we didn't specifically catch
-        elif "unique constraint" in error_message.lower() or "uniqueviolation" in error_message.lower():
-            constraint_name = error_message.split('constraint "')[1].split('"')[0] if 'constraint "' in error_message else "unknown"
-            return jsonify({"success": False, "data": {"error": f"Duplicate value for {constraint_name}", "trace_id": trace_id}}), 400
-        
+        # If we couldn't identify the error type, return a generic error
         else:
-            logger.error(f"[TraceID: {trace_id}] Unhandled registration error: {e}")
-            return jsonify({"success": False, "data": {"error": "An error occurred during registration", "trace_id": trace_id}}), 500
+            return jsonify({"success": False, "data": {"error": f"Database error: {error_message}", "trace_id": trace_id}}), 400
+    
     except Exception as e:
         db.rollback()
-        trace_id = uuid.uuid4().hex[:8]
+        logger.error(f"[TraceID: {trace_id}] Registration error: {str(e)} (Type: {type(e).__name__})")
         
-        # Log with detailed formatting including exception type
-        logger.error(f"[TraceID: {trace_id}] Registration error: {e} (Type: {type(e).__name__})")
+        # Publish error event
+        error_event = {
+            'event_type': 'system.error',
+            'service': 'auth-service',
+            'operation': 'register',
+            'error': str(e),
+            'error_type': type(e).__name__,
+            'trace_id': trace_id
+        }
+        publish_event('system_events', 'system.error', error_event)
         
-        # Add detailed error handling for common issues
-        if "connection" in str(e).lower() or "timeout" in str(e).lower():
-            logger.error(f"[TraceID: {trace_id}] Database connection issue: {e}")
-            return jsonify({"success": False, "data": {"error": "Database connection issue, please try again later", "trace_id": trace_id}}), 503
+        # Check if it's a database connection issue
+        if "timeout" in str(e).lower() or "connection" in str(e).lower():
+            logger.error(f"[TraceID: {trace_id}] Database connection issue: {str(e)}")
+            return jsonify({"success": False, "data": {"error": "Database connection issue. Please try again later.", "trace_id": trace_id}}), 503
         
-        # Import traceback if not already imported at the top
-        import traceback
-        logger.error(f"[TraceID: {trace_id}] Exception traceback: {traceback.format_exc()}")
-        
-        return jsonify({"success": False, "data": {"error": "An error occurred during registration", "trace_id": trace_id}}), 500
+        # Generic error
+        return jsonify({"success": False, "data": {"error": f"An unexpected error occurred: {str(e)}", "trace_id": trace_id}}), 500
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
