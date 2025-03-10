@@ -5,25 +5,27 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from database import Base
 
 class Account(Base):
+    """User account model"""
     __tablename__ = "accounts"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String(80), unique=True, nullable=False)
+    username = Column(String(50), unique=True, nullable=False, index=True)
     password = Column(String(255), nullable=False)
     account_type = Column(String(20), nullable=False)
     is_active = Column(Boolean, default=True)
-    last_login = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, onupdate=datetime.now)
     
-    # Relationship with Users and Companies (one-to-one)
+    # Relationships
     user = relationship("User", back_populates="account", uselist=False, cascade="all, delete-orphan")
     company = relationship("Company", back_populates="account", uselist=False, cascade="all, delete-orphan")
     
     def set_password(self, password):
+        """Set password hash using werkzeug"""
         self.password = generate_password_hash(password)
-        
+    
     def check_password(self, password):
+        """Check if the password matches"""
         return check_password_hash(self.password, password)
     
     def to_dict(self):
@@ -32,8 +34,8 @@ class Account(Base):
             "username": self.username,
             "account_type": self.account_type,
             "is_active": self.is_active,
-            "last_login": self.last_login.isoformat() if self.last_login else None,
-            "created_at": self.created_at.isoformat() if self.created_at else None
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None
         }
 
 

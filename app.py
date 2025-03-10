@@ -6,7 +6,7 @@ import os
 import logging
 import jwt as pyjwt
 from datetime import datetime, timezone
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 import time
 import tempfile
 import fcntl
@@ -176,7 +176,22 @@ def delayed_start_event_consumers():
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "healthy", "service": "auth-service"})
+    """Health check endpoint for service monitoring"""
+    try:
+        # Lighter weight check - avoid database query to prevent connection pool depletion
+        return jsonify({
+            "status": "healthy",
+            "service": "auth-service",
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return jsonify({
+            "status": "unhealthy",
+            "service": "auth-service",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 @app.route('/authentication/validate-token', methods=['POST'])
 def validate_token():

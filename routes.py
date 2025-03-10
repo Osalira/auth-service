@@ -4,8 +4,9 @@ from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import logging
 import uuid
+import threading
 
-from database import get_db
+from database import get_db, get_db_context
 from models import Account, User, Company
 from rabbitmq import publish_event
 
@@ -47,193 +48,144 @@ def register():
             # Generate a default email if not provided
             data['email'] = f"{data['username']}@example.com"
     elif data['account_type'] == 'company':
-        # For company accounts, only company_name is required, which can come from 'name' field
-        if 'name' not in data and 'company_name' not in data:
-            return jsonify({"success": False, "data": {"error": "Company accounts require a name"}}), 400
-        
-        # Use 'name' as 'company_name' if not provided
         if 'company_name' not in data:
-            data['company_name'] = data['name']
-        
-        # Generate default values for required company fields
+            return jsonify({"success": False, "data": {"error": "Company name is required for company accounts"}}), 400
         if 'business_registration' not in data:
-            # Generate a unique business registration
-            data['business_registration'] = f"BR-{uuid.uuid4().hex[:8].upper()}"
-        
+            return jsonify({"success": False, "data": {"error": "Business registration number is required for company accounts"}}), 400
         if 'company_email' not in data:
-            # Generate a default company email
-            data['company_email'] = f"{data['username']}-company@example.com"
-    else:
-        return jsonify({"success": False, "data": {"error": "Invalid account_type. Must be 'user' or 'company'"}}), 400
+            # Generate a default email if not provided
+            data['company_email'] = f"{data['username']}@company.com"
     
-    db = get_db()
+    # First, check if username exists without opening a transaction
     try:
-        # First check if username already exists BEFORE attempting creation
-        existing_account = db.query(Account).filter_by(username=data['username']).first()
-        if existing_account:
-            logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing username: {data['username']}")
-            return jsonify({"success": False, "data": {"error": "Username already exists", "trace_id": trace_id}}), 400
+        # Use a short-lived connection just to check username existence
+        with get_db_context() as db:
+            existing_account = db.query(Account.id).filter_by(username=data['username']).first()
             
-        # Check for email uniqueness if provided
-        if data['account_type'] == 'user' and 'email' in data:
-            existing_email = db.query(User).filter_by(email=data['email']).first()
-            if existing_email:
-                logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing email: {data['email']}")
-                return jsonify({"success": False, "data": {"error": "Email already exists", "trace_id": trace_id}}), 400
-                
-        # Check for company email uniqueness if provided
-        if data['account_type'] == 'company' and 'company_email' in data:
-            existing_company_email = db.query(Company).filter_by(company_email=data['company_email']).first()
-            if existing_company_email:
-                logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing company email: {data['company_email']}")
-                return jsonify({"success": False, "data": {"error": "Company email already exists", "trace_id": trace_id}}), 400
-                
-        # Check for business registration uniqueness if provided
-        if data['account_type'] == 'company' and 'business_registration' in data:
-            existing_registration = db.query(Company).filter_by(business_registration=data['business_registration']).first()
-            if existing_registration:
-                logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing business registration: {data['business_registration']}")
-                return jsonify({"success": False, "data": {"error": "Business registration already exists", "trace_id": trace_id}}), 400
-            
-        # Publish user registration attempt event (before actual creation)
-        # This can be consumed by monitoring/fraud detection systems
-        registration_started_event = {
-            'event_type': 'user.registration_started',
-            'username': data['username'],
-            'account_type': data['account_type'],
-            'timestamp': datetime.utcnow().isoformat(),
-            'trace_id': trace_id
-        }
-        publish_event('user_events', 'user.registration_started', registration_started_event)
-            
-        # Create account
-        account = Account(
-            username=data['username'],
-            account_type=data['account_type']
-        )
-        account.set_password(data['password'])
-        
-        db.add(account)
-        db.flush()  # Flush to get the account ID
-        
-        # Create user or company based on account_type
-        if data['account_type'] == 'user':
-            user = User(
-                id=account.id,
-                name=data['name'],
-                email=data['email'],
-                account_balance=data.get('account_balance', 0.0)
+            if existing_account:
+                logger.warning(f"[TraceID: {trace_id}] Attempted to register with existing username: {data['username']}")
+                return jsonify({"success": False, "data": {"error": "Username already exists", "trace_id": trace_id}}), 400
+    except Exception as e:
+        logger.error(f"[TraceID: {trace_id}] Error checking for existing username: {str(e)}")
+        # Continue to try the full registration process even if the check failed
+    
+    # Process the registration if username doesn't exist
+    try:
+        with get_db_context() as db:
+            # Create the account
+            account = Account(
+                username=data['username'],
+                account_type=data['account_type'],
+                created_at=datetime.utcnow()
             )
-            db.add(user)
-        else:  # company
-            company = Company(
-                id=account.id,
-                company_name=data['company_name'],
-                business_registration=data['business_registration'],
-                company_email=data['company_email'],
-                contact_phone=data.get('contact_phone'),
-                address=data.get('address'),
-                industry=data.get('industry'),
-                total_shares_issued=data.get('total_shares_issued', 0),
-                shares_available=data.get('shares_available', 0)
-            )
-            db.add(company)
-        
-        # Final commit - only commit here after everything is ready
-        db.commit()
-        
-        # Return success response with account details
-        account_data = {
-            "id": account.id,
-            "username": account.username,
-            "account_type": account.account_type
-        }
-        
-        # Get additional user or company details to include in the token
-        account_details = {}
-        if data['account_type'] == 'user':
-            user = db.query(User).filter_by(id=account.id).first()
-            if user:
-                account_details = {
-                    "name": user.name,
-                    "email": user.email,
-                    "account_balance": float(user.account_balance) if user.account_balance else 0.0
-                }
-                # Add these details to the account_data as well
-                account_data.update(account_details)
-        else:  # company
-            company = db.query(Company).filter_by(id=account.id).first()
-            if company:
-                account_details = {
-                    "company_name": company.company_name,
-                    "business_registration": company.business_registration,
-                    "company_email": company.company_email
-                }
-                # Add these details to the account_data as well
-                account_data.update(account_details)
-        
-        # Create access token - just like in the login endpoint
-        access_token = create_access_token(
-            identity={
-                "id": account.id,
-                "username": account.username,
-                "account_type": account.account_type,
-                **account_details
-            }
-        )
-        
-        # Format response as expected by JMeter and the frontend
-        response_data = {
-            "success": True,
-            "data": {
-                "token": access_token,  # Include the token here
-                "message": "Account created successfully",
-                "account": account_data
-            }
-        }
-        
-        # Publish user.registered event
-        user_registered_event = {
-            'event_type': 'user.registered',
-            'user_id': account.id, 
-            'username': account.username,
-            'account_type': account.account_type,
-            'created_at': datetime.utcnow().isoformat(),
-            'trace_id': trace_id
-        }
-        
-        # Add account-specific data to the event
-        if data['account_type'] == 'user':
-            user_registered_event.update({
-                'name': user.name,
-                'email': user.email
-            })
-        else:  # company
-            user_registered_event.update({
-                'company_name': company.company_name,
-                'business_registration': company.business_registration,
-                'company_email': company.company_email
-            })
+            account.set_password(data['password'])
+            db.add(account)
             
-        # Publish the event asynchronously
-        publish_event('user_events', 'user.registered', user_registered_event)
-        logger.info(f"[TraceID: {trace_id}] Published user.registered event for user {account.username} (ID: {account.id})")
-        
-        return jsonify(response_data), 201
-        
+            # Flush to get the account ID
+            db.flush()
+            
+            # Create the user-specific or company-specific record
+            if data['account_type'] == 'user':
+                user = User(
+                    id=account.id,  # Use id instead of account_id to match the model
+                    name=data['name'],
+                    email=data['email']
+                )
+                db.add(user)
+                response_data = {
+                    "success": True,
+                    "data": {
+                        "id": account.id,
+                        "username": account.username,
+                        "account_type": account.account_type,
+                        "name": data['name'],
+                        "email": data['email'],
+                        "trace_id": trace_id
+                    }
+                }
+            else:  # company
+                company = Company(
+                    id=account.id,  # Use id instead of account_id to match the model
+                    company_name=data['company_name'],
+                    business_registration=data['business_registration'],
+                    company_email=data['company_email']
+                )
+                db.add(company)
+                response_data = {
+                    "success": True,
+                    "data": {
+                        "id": account.id,
+                        "username": account.username,
+                        "account_type": account.account_type,
+                        "company_name": data['company_name'],
+                        "business_registration": data['business_registration'],
+                        "company_email": data['company_email'],
+                        "trace_id": trace_id
+                    }
+                }
+            
+            # Commit the transaction
+            db.commit()
+            
+            # Queue events for publishing (no thread creation)
+            try:
+                # Create event data
+                registration_started_event = {
+                    'event_type': 'user.registration_started',
+                    'username': data['username'],
+                    'account_type': data['account_type'],
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'trace_id': trace_id
+                }
+                
+                user_registered_event = {
+                    'event_type': 'user.registered',
+                    'user_id': account.id, 
+                    'username': account.username,
+                    'account_type': account.account_type,
+                    'created_at': datetime.utcnow().isoformat(),
+                    'trace_id': trace_id
+                }
+                
+                # Add account-specific data to the event
+                if data['account_type'] == 'user':
+                    user_registered_event.update({
+                        'name': user.name,
+                        'email': user.email
+                    })
+                else:  # company
+                    user_registered_event.update({
+                        'company_name': company.company_name,
+                        'business_registration': company.business_registration,
+                        'company_email': company.company_email
+                    })
+                
+                # Publish events via the queue system
+                publish_event('user_events', 'user.registration_started', registration_started_event)
+                publish_event('user_events', 'user.registered', user_registered_event)
+            except Exception as e:
+                logger.error(f"[TraceID: {trace_id}] Failed to queue registration events: {str(e)}")
+            
+            return jsonify(response_data), 201
+            
     except IntegrityError as e:
         db.rollback()
         error_message = str(e)
         logger.error(f"[TraceID: {trace_id}] IntegrityError during registration: {error_message}")
         
-        # Publish registration error event
+        # Create error event data
         error_event = {
             'event_type': 'user.registration_failed',
             'username': data['username'],
             'error': str(e),
             'trace_id': trace_id
         }
-        publish_event('system_events', 'user.registration_failed', error_event)
+        
+        # Queue error event without creating a thread
+        try:
+            publish_event('system_events', 'user.registration_failed', error_event)
+        except Exception as e:
+            logger.error(f"[TraceID: {trace_id}] Failed to queue error event: {str(e)}")
         
         # More robust checks for username constraint violations
         if "accounts.username" in error_message or "accounts_username_key" in error_message or "username" in error_message:
@@ -251,7 +203,7 @@ def register():
         db.rollback()
         logger.error(f"[TraceID: {trace_id}] Registration error: {str(e)} (Type: {type(e).__name__})")
         
-        # Publish error event
+        # Create error event data
         error_event = {
             'event_type': 'system.error',
             'service': 'auth-service',
@@ -260,7 +212,12 @@ def register():
             'error_type': type(e).__name__,
             'trace_id': trace_id
         }
-        publish_event('system_events', 'system.error', error_event)
+        
+        # Queue error event without creating a thread
+        try:
+            publish_event('system_events', 'system.error', error_event)
+        except Exception as e:
+            logger.error(f"[TraceID: {trace_id}] Failed to queue error event: {str(e)}")
         
         # Check if it's a database connection issue
         if "timeout" in str(e).lower() or "connection" in str(e).lower():
@@ -282,71 +239,71 @@ def login():
     if 'username' not in data or 'password' not in data:
         return jsonify({"success": False, "data": {"error": "Username and password are required"}}), 400
     
-    db = get_db()
+    # Use context manager for database session
     try:
-        # Find the account
-        account = db.query(Account).filter_by(username=data['username']).first()
-        
-        # Check if account exists and password is correct
-        if not account or not account.check_password(data['password']):
-            return jsonify({"success": False, "data": {"error": "Invalid username or password"}}), 400
-        
-        # Check if account is active
-        if not account.is_active:
-            return jsonify({"success": False, "data": {"error": "Account is inactive"}}), 403
-        
-        # Update last login
-        account.last_login = datetime.utcnow()
-        db.commit()
-        
-        # Get user or company details
-        account_details = {}
-        if account.account_type == 'user':
-            user = db.query(User).filter_by(id=account.id).first()
-            if user:
-                account_details = {
-                    "id": user.id,
-                    "name": user.name,
-                    "email": user.email,
-                    "account_balance": float(user.account_balance) if user.account_balance else 0.0
-                }
-        else:  # company
-            company = db.query(Company).filter_by(id=account.id).first()
-            if company:
-                account_details = {
-                    "id": company.id,
-                    "company_name": company.company_name,
-                    "business_registration": company.business_registration,
-                    "company_email": company.company_email
-                }
-        
-        # Create access token
-        access_token = create_access_token(
-            identity={
-                "id": account.id,
-                "username": account.username,
-                "account_type": account.account_type,
-                **account_details
-            }
-        )
-        
-        # Format response as expected by JMeter
-        response_data = {
-            "success": True,
-            "data": {
-                "token": access_token,
-                "message": "Login successful",
-                "account": {
+        with get_db_context() as db:
+            # Find the account
+            account = db.query(Account).filter_by(username=data['username']).first()
+            
+            # Check if account exists and password is correct
+            if not account or not account.check_password(data['password']):
+                return jsonify({"success": False, "data": {"error": "Invalid username or password"}}), 400
+            
+            # Check if account is active
+            if not account.is_active:
+                return jsonify({"success": False, "data": {"error": "Account is inactive"}}), 403
+            
+            # Update last login
+            account.last_login = datetime.utcnow()
+            
+            # Get user or company details
+            account_details = {}
+            if account.account_type == 'user':
+                user = db.query(User).filter_by(id=account.id).first()
+                if user:
+                    account_details = {
+                        "id": user.id,
+                        "name": user.name,
+                        "email": user.email,
+                        "account_balance": float(user.account_balance) if user.account_balance else 0.0
+                    }
+            else:  # company
+                company = db.query(Company).filter_by(id=account.id).first()
+                if company:
+                    account_details = {
+                        "id": company.id,
+                        "company_name": company.company_name,
+                        "business_registration": company.business_registration,
+                        "company_email": company.company_email
+                    }
+            
+            # Create access token
+            access_token = create_access_token(
+                identity={
                     "id": account.id,
                     "username": account.username,
                     "account_type": account.account_type,
                     **account_details
                 }
+            )
+            
+            # Format response as expected by JMeter
+            response_data = {
+                "success": True,
+                "data": {
+                    "token": access_token,
+                    "message": "Login successful",
+                    "account": {
+                        "id": account.id,
+                        "username": account.username,
+                        "account_type": account.account_type,
+                        **account_details
+                    }
+                }
             }
-        }
-        
-        return jsonify(response_data), 200
-        
+            
+            return jsonify(response_data), 200
+            
     except Exception as e:
         logger.error(f"Error during login: {str(e)}")
         return jsonify({"success": False, "data": {"error": f"Error during login: {str(e)}"}}), 500
