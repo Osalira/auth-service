@@ -12,6 +12,7 @@ import tempfile
 import fcntl
 import threading
 from rabbitmq import start_consumer, publish_event
+from docker_add_indexes import add_indexes_docker  # Import the Docker-specific index function
 
 # Load environment variables
 load_dotenv()
@@ -61,8 +62,26 @@ def initialize_database():
                 if not inspector.has_table("accounts"):
                     logger.info("Creating database tables as they don't exist")
                     Base.metadata.create_all(bind=engine)
+                    
+                    # Add extra performance indexes after tables are created
+                    try:
+                        logger.info("Adding performance indexes")
+                        # Wait a bit for tables to be fully committed
+                        time.sleep(2)
+                        add_indexes_docker()
+                    except Exception as e:
+                        logger.error(f"Error adding indexes: {str(e)}")
+                        logger.error("Continuing without all indexes, basic functionality will work")
                 else:
                     logger.info("Database tables already exist, skipping creation")
+                    
+                    # Still try to add indexes in case they're missing, but don't crash if it fails
+                    try:
+                        logger.info("Ensuring all performance indexes exist")
+                        add_indexes_docker()
+                    except Exception as e:
+                        logger.error(f"Error adding indexes: {str(e)}")
+                        logger.error("Continuing without all indexes, basic functionality will work")
                     
                 # Release the lock
                 fcntl.flock(f, fcntl.LOCK_UN)

@@ -21,7 +21,8 @@ RUN apt-get update \
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir gevent
 
 # Copy project files
 COPY . .
@@ -42,5 +43,5 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:5000/health || exit 1
 
 # Command to run the Flask app
-# Using gunicorn as production server
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:5000 --workers ${GUNICORN_WORKERS:-4} --threads ${GUNICORN_THREADS:-8} --worker-class gthread --worker-connections 1000 --timeout ${GUNICORN_TIMEOUT:-600} --keep-alive ${GUNICORN_KEEPALIVE:-5} --max-requests ${GUNICORN_MAX_REQUESTS:-10000} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-1000} --log-level info app:app"] 
+# Using gunicorn as production server with gevent worker for high concurrency
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:5000 --workers ${GUNICORN_WORKERS:-8} --threads ${GUNICORN_THREADS:-12} --worker-class ${GUNICORN_WORKER_CLASS:-gevent} --worker-connections ${GUNICORN_WORKER_CONNECTIONS:-2000} --timeout ${GUNICORN_TIMEOUT:-900} --keep-alive ${GUNICORN_KEEPALIVE:-5} --max-requests ${GUNICORN_MAX_REQUESTS:-20000} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-2000} --log-level info app:app"] 

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, Float, DateTime, ForeignKey, BigInteger
+from sqlalchemy import Column, Integer, String, Boolean, Float, DateTime, ForeignKey, BigInteger, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -11,14 +11,20 @@ class Account(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(50), unique=True, nullable=False, index=True)
     password = Column(String(255), nullable=False)
-    account_type = Column(String(20), nullable=False)
+    account_type = Column(String(20), nullable=False, index=True)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.now, index=True)
     updated_at = Column(DateTime, onupdate=datetime.now)
     
     # Relationships
     user = relationship("User", back_populates="account", uselist=False, cascade="all, delete-orphan")
     company = relationship("Company", back_populates="account", uselist=False, cascade="all, delete-orphan")
+    
+    # Define composite indices
+    __table_args__ = (
+        Index('idx_account_username_account_type', username, account_type),
+        Index('idx_account_created_at', created_at),
+    )
     
     def set_password(self, password):
         """Set password hash using werkzeug"""
@@ -43,8 +49,8 @@ class User(Base):
     __tablename__ = "users"
     
     id = Column(Integer, ForeignKey("accounts.id"), primary_key=True)
-    name = Column(String(120), nullable=False)
-    email = Column(String(120), unique=True)
+    name = Column(String(120), nullable=False, index=True)
+    email = Column(String(120), unique=True, index=True)
     account_balance = Column(Float, default=0.0)
     
     # Relationship with Account (one-to-one)
@@ -64,9 +70,9 @@ class Company(Base):
     __tablename__ = "companies"
     
     id = Column(Integer, ForeignKey("accounts.id"), primary_key=True)
-    company_name = Column(String(120), nullable=False)
-    business_registration = Column(String(50), unique=True, nullable=True)
-    company_email = Column(String(120), unique=True, nullable=True)
+    company_name = Column(String(120), nullable=False, index=True)
+    business_registration = Column(String(50), unique=True, nullable=True, index=True)
+    company_email = Column(String(120), unique=True, nullable=True, index=True)
     contact_phone = Column(String(20))
     address = Column(String(255))
     industry = Column(String(50))
