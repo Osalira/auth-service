@@ -120,7 +120,7 @@ class RabbitMQConnectionPool:
             self.connection_count = 0
 
 # Global connection pool
-connection_pool = RabbitMQConnectionPool(max_connections=20)
+connection_pool = RabbitMQConnectionPool(max_connections=50)
 
 class RabbitMQClient:
     """RabbitMQ client for publishing and consuming events"""
@@ -157,7 +157,7 @@ class RabbitMQClient:
 
     def _publisher_worker(self):
         """Background worker that publishes messages from the queue"""
-        batch_size = 10  # Process messages in batches
+        batch_size = 50  # Process messages in batches (increased from 10)
         wait_time = 0.1  # Wait time between batches when queue is empty
         
         while True:
@@ -317,8 +317,15 @@ class RabbitMQClient:
 rabbitmq_client = RabbitMQClient()
 
 # Helper function to publish an event
-def publish_event(exchange, routing_key, message):
+def publish_event(exchange, routing_key, message=None):
     """Publish an event to RabbitMQ"""
+    # Backward compatibility - if only two arguments are provided,
+    # assume the second argument is the message and use event_type as routing_key
+    if message is None:
+        message = routing_key
+        # Extract routing key from the message's event_type field
+        routing_key = message.get('event_type', 'default.event')
+    
     return rabbitmq_client.publish_event(exchange, routing_key, message)
 
 # Helper function to start a consumer

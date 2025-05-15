@@ -138,8 +138,8 @@ def register():
             
         try:
             # Publish events asynchronously after transaction is committed
-            publish_event('user_events', registration_started_event)
-            publish_event('user_events', user_registered_event)
+            publish_event('user_events', 'user.registration_started', registration_started_event)
+            publish_event('user_events', 'user.registered', user_registered_event)
         except Exception as event_error:
             # Log but don't fail the registration if event publishing fails
             logger.error(f"[TraceID: {trace_id}] Error publishing registration events: {str(event_error)}")
